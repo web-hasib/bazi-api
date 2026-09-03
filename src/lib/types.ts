@@ -38,12 +38,9 @@ export type {
   CurrentAnnualLuck,
 };
 
-export interface ApiResponseWrapper {
+export interface ApiResponse<T = BaziCalculateResponse> {
   success: boolean;
-  data?: BaziCalculateResponse;
+  data?: T;
   error?: string;
-  source?: 'live' | 'sample';
-  note?: string;
+  statusCode?: number;
 }
-
-export type FiveElementType = 'Wood' | 'Fire' | 'Earth' | 'Metal' | 'Water';
