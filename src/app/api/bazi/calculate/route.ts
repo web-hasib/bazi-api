@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { BaziClient, BaziError, ApiError, ValidationError } from '@baziapi/sdk';
-import { generateRealisticBazi } from '@/lib/fallback-data';
-import type { BaziCalculateRequest, ApiResponseWrapper } from '@/lib/types';
+import { ApiError, ValidationError, TimeoutError, NetworkError } from '@baziapi/sdk';
+import { getBaziClient } from '@/lib/bazi-client';
+import type { BaziCalculateRequest, ApiResponse } from '@/lib/types';
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,19 +13,18 @@ export async function POST(req: NextRequest) {
       timezone = 'Asia/Dhaka',
       language = 'en',
       apiKey,
-      forceDemo = false,
     } = body;
 
     // Validate inputs
     if (!birthDate) {
-      return NextResponse.json<ApiResponseWrapper>(
+      return NextResponse.json<ApiResponse>(
         { success: false, error: 'Birth date is required (format: YYYY-MM-DD)' },
         { status: 400 }
       );
     }
 
     if (!gender || (gender !== 'male' && gender !== 'female')) {
-      return NextResponse.json<ApiResponseWrapper>(
+      return NextResponse.json<ApiResponse>(
         { success: false, error: 'Gender must be either "male" or "female"' },
         { status: 400 }
       );
@@ -39,64 +38,51 @@ export async function POST(req: NextRequest) {
       language: language === 'zh' ? 'zh' : 'en',
     };
 
-    // If explicit demo mode is requested, return realistic calculation immediately
-    if (forceDemo) {
-      const demoData = generateRealisticBazi(calcRequest);
-      return NextResponse.json<ApiResponseWrapper>({
-        success: true,
-        data: demoData,
-        source: 'sample',
-        note: 'Calculated using high-precision built-in BaZi engine (Demo Mode).',
-      });
-    }
+    // Instantiate official BaziClient and calculate strictly via @baziapi/sdk
+    const client = getBaziClient(apiKey);
+    const result = await client.bazi.calculate(calcRequest);
 
-    // Try calculating with official @baziapi/sdk client
-    const effectiveApiKey = apiKey?.trim() || process.env.BAZI_API_KEY || '';
-    const baseUrl = process.env.BAZI_BASE_URL || 'https://api.baziapi.pro';
-
-    try {
-      const client = new BaziClient({
-        apiKey: effectiveApiKey || 'bazi_guest_trial',
-        baseUrl,
-        timeout: 6000,
-        retries: 1,
-      });
-
-      const result = await client.bazi.calculate(calcRequest);
-
-      return NextResponse.json<ApiResponseWrapper>({
-        success: true,
-        data: result,
-        source: 'live',
-        note: 'Live calculation returned from official BaZi API server.',
-      });
-    } catch (sdkError: unknown) {
-      console.warn('BaZi SDK upstream call failed, falling back to local calculation:', sdkError);
-
-      let reason = 'Live BaZi server unavailable.';
-      if (sdkError instanceof ValidationError) {
-        reason = `SDK Validation Error: ${sdkError.message}`;
-      } else if (sdkError instanceof ApiError) {
-        reason = `Upstream API Error (${sdkError.statusCode}): ${sdkError.message}`;
-      } else if (sdkError instanceof BaziError) {
-        reason = `SDK Error: ${sdkError.message}`;
-      } else if (sdkError instanceof Error) {
-        reason = sdkError.message;
-      }
-
-      // Seamless fallback with clear notification in payload
-      const fallbackResult = generateRealisticBazi(calcRequest);
-
-      return NextResponse.json<ApiResponseWrapper>({
-        success: true,
-        data: fallbackResult,
-        source: 'sample',
-        note: `${reason} Displaying high-precision calculation result so you can continue testing smoothly.`,
-      });
-    }
+    return NextResponse.json<ApiResponse>({
+      success: true,
+      data: result,
+    });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Internal server error';
-    return NextResponse.json<ApiResponseWrapper>(
+    console.error('Error calculating BaZi via @baziapi/sdk:', error);
+
+    if (error instanceof ValidationError) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: `Validation Error [${error.field}]: ${error.message}` },
+        { status: 400 }
+      );
+    }
+
+    if (error instanceof ApiError) {
+      return NextResponse.json<ApiResponse>(
+        {
+          success: false,
+          error: `API Error (${error.statusCode}): ${error.message}`,
+          statusCode: error.statusCode,
+        },
+        { status: error.statusCode || 500 }
+      );
+    }
+
+    if (error instanceof TimeoutError) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: `Request timed out after ${error.timeoutMs}ms` },
+        { status: 504 }
+      );
+    }
+
+    if (error instanceof NetworkError) {
+      return NextResponse.json<ApiResponse>(
+        { success: false, error: 'Network error: could not connect to BaZi API server' },
+        { status: 503 }
+      );
+    }
+
+    const message = error instanceof Error ? error.message : 'Internal calculation error';
+    return NextResponse.json<ApiResponse>(
       { success: false, error: message },
       { status: 500 }
     );
